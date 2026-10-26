@@ -21,3 +21,5 @@ pub mod ledger;
 pub mod merkle;
 pub mod projection;
 pub mod rank;
+/// 签名与信任锚（人的那一轴）：密钥生成、待签字节、签名产生。
+pub mod signing;

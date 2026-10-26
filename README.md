@@ -41,6 +41,20 @@ print(w.label(claim))        # FREEZEABLE（两条独立来源）/ TENTATIVE（�
 **CLI 与 stdio 守护进程同一套实现**（不开端口）。详见 [`ADAPTER-SDK.md`](ADAPTER-SDK.md)，
 可跑示例 [`examples/agent_demo.py`](examples/agent_demo.py)、Python SDK [`sdk/python/warrant`](sdk/python/warrant)。
 
+**够格 ≠ 事实**：`FREEZEABLE` 之后要有人签 ——
+
+```bash
+warrantd keygen --out ~/warrant-human.key.json          # ① 生成人类钥（一次）
+warrantd trust  --root .warrant --key-id ed25519:<hex>  # ② 人登记（信任锚）
+warrantd freeze --root .warrant --claim <id> --key ~/warrant-human.key.json --signer user:me
+# → state: WARRANTED
+```
+
+**甲轴不可伪造**：`warrantd observe --exec "<cmd>"` 时命令由 warrantd 自己执行、stdout 即结果，
+agent 只能"请求跑"不能"提供结果"。跨机器用 `warrantd aggregate <rootA> <rootB>` 合并数轴。
+
+多语言：Python ✅（真机跑通）/ TypeScript ✅（零依赖）/ Go ⚠️ 未编译验证（本机无工具链）。
+
 ## 规范（改判据之前先读）
 
 | 文件 | 内容 |

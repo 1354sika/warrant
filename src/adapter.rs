@@ -120,7 +120,12 @@ impl Adapter {
     }
 
     /// 追加一条（**唯一写入口**）：自算 seq / prev / id，落盘后返回 `(id, seq)`。
-    fn append(&self, mut body: Value) -> R<(String, i64)> {
+    fn append(&self, body: Value) -> R<(String, i64)> {
+        self.append_full(body, Vec::new())
+    }
+
+    /// 带签名的追加（签名增长：同一 id 再追加一行，`dedup` 会把签名合并进首条）。
+    fn append_full(&self, mut body: Value, sigs: Vec<Value>) -> R<(String, i64)> {
         let _guard = Lock::acquire(&self.root)?;
         let entries = self.entries()?;
         let merged = ledger::dedup(&entries);
@@ -137,10 +142,11 @@ impl Adapter {
         let id = canon::event_id(&body).map_err(|e| AdapterError(format!("event_id: {e}")))?;
 
         let line = format!(
-            "{{\"spec\":\"{}\",\"id\":\"{}\",\"body\":{},\"signatures\":[]}}\n",
+            "{{\"spec\":\"{}\",\"id\":\"{}\",\"body\":{},\"signatures\":{}}}\n",
             ledger::SPEC,
             id,
-            to_json(&body)
+            to_json(&body),
+            sigs_json(&sigs)
         );
         let mut f = OpenOptions::new()
             .append(true)
@@ -268,13 +274,49 @@ impl Adapter {
         ]))
     }
 
+    /// 给既有条目**追加一个签名**（签名增长）。账本仍 append-only：新行同 id、多一个签名，
+    /// `ledger::dedup` 在读取时合并 ⇒ 不改任何历史字节。
+    ///
+    /// 关键细节（踩过）：新行必须**沿用原 body 与原 id**。因为 `id = event_id(body)` 而
+    /// body 里包含 `chain`——若像普通追加那样重算 chain，id 就变了，签名会挂到一条“新条目”上，
+    /// 原 claim 永远拿不到 freeze 签名（表现为“签了但状态还是 CONSISTENT”）。
+    pub fn add_signature(&self, entry_id: &str, sig: Value) -> R<(String, i64)> {
+        let _guard = Lock::acquire(&self.root)?;
+        let entries = self.entries()?;
+        let merged = ledger::dedup(&entries);
+        let base = merged
+            .iter()
+            .find(|e| e.id == entry_id)
+            .ok_or_else(|| AdapterError(format!("账本里没有 {entry_id}")))?;
+        let mut sigs = base.signatures.clone();
+        sigs.push(sig);
+        let line = format!(
+            "{{\"spec\":\"{}\",\"id\":\"{}\",\"body\":{},\"signatures\":{}}}\n",
+            ledger::SPEC,
+            entry_id,
+            to_json(&base.body),
+            sigs_json(&sigs)
+        );
+        let mut f = OpenOptions::new()
+            .append(true)
+            .open(self.ledger_path())
+            .map_err(|e| AdapterError(format!("open for append: {e}")))?;
+        f.write_all(line.as_bytes())
+            .map_err(|e| AdapterError(format!("append: {e}")))?;
+        f.flush().ok();
+        Ok((entry_id.to_string(), merged.len() as i64))
+    }
+
     /// 只读复算：链位 + 逐条密码学签名。**任何第三方拿到同一文件都能跑出同样结果**。
     pub fn verify(&self) -> R<Value> {
         let entries = self.entries()?;
         let merged = ledger::dedup(&entries);
         let chain_errs = ledger::verify_chain(&entries);
         let sig_errs = ledger::verify_signatures(&entries);
-        let ok = chain_errs.is_empty() && sig_errs.is_empty();
+        // 信任锚：签名“密码学正确”不等于“这个人”；key_id 必须落在已登记的人类公钥集里。
+        let trusted = crate::signing::trusted_keys(&self.root);
+        let trust_errs = ledger::check_key_trust(&entries, &trusted);
+        let ok = chain_errs.is_empty() && sig_errs.is_empty() && trust_errs.is_empty();
         Ok(Value::Object(vec![
             ("ok".to_string(), Value::Bool(ok)),
             ("root".to_string(), s(&self.root.display().to_string())),
@@ -288,8 +330,26 @@ impl Adapter {
                 "signature_errors".to_string(),
                 Value::Array(sig_errs.iter().map(|e| s(e)).collect()),
             ),
+            (
+                "trust_errors".to_string(),
+                Value::Array(trust_errs.iter().map(|e| s(e)).collect()),
+            ),
+            ("trusted_keys".to_string(), Value::Int(trusted.len() as i64)),
         ]))
     }
+}
+
+/// 把一个签名数组序列化成信封里的 `signatures` 字段（紧凑、与 body 同口径）。
+fn sigs_json(sigs: &[Value]) -> String {
+    let mut arr = String::from("[");
+    for (i, s) in sigs.iter().enumerate() {
+        if i > 0 {
+            arr.push(',');
+        }
+        arr.push_str(&to_json(s));
+    }
+    arr.push(']');
+    arr
 }
 
 /// 极简互斥：同一目录多进程同时 append 会写坏链位 ⇒ 用 `create_new` 锁文件串行。

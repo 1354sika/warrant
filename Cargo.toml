@@ -19,6 +19,8 @@ unicode-normalization = "0.1"
 # 仅用于**验证**签名（ledger::verify_signatures）；本 crate 不生成任何签名。
 ed25519-dalek = "2"
 p256 = { version = "0.13", default-features = false, features = ["ecdsa"] }
+# 仅用于生成 ed25519 密钥种子（系统 CSPRNG；不参与验签路径）。
+getrandom = "0.2"
 
 [dev-dependencies]
 serde_json = "1"

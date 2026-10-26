@@ -101,3 +101,74 @@ print(w.label(claim))     # FREEZEABLE / TENTATIVE
 
 任何人拿到 `entries.jsonl` + 本仓代码，都能跑 `warrantd verify` 得到同样结论——
 这就是"可独立复算"的含义。
+
+## 七 签名与冻结（人的那一轴）
+
+`FREEZEABLE` 只是"够格"，**够格不等于事实**。要成为事实，必须有人签：
+
+```bash
+# ① 生成一把人类钥（只一次；文件里有私钥，放账本目录外）
+warrantd keygen --out ~/warrant-human.key.json
+# → {"ok":true,"key_id":"ed25519:<hex>", ...}
+
+# ② 人登记这把钥（信任锚）——**这一步必须由人执行**
+warrantd trust --root .warrant --key-id ed25519:<hex> --note "我的离线钥"
+
+# ③ 签
+warrantd freeze --root .warrant --claim <claim id> --key ~/warrant-human.key.json \
+  --signer user:me --reason "确认"
+# → {"claims":[{"state":"WARRANTED", ...}]}
+
+# 只出待签字节、私钥不出本机（交给硬件令牌/其他机器签）
+warrantd freeze --root .warrant --claim <id> --signer user:me --print-payload
+```
+
+三道闸都在代码里（`tests/signing.rs` 钉住）：
+
+1. **证据不足不许冻**：`d_eff < 2` 或只有 AI 轴 ⇒ 直接报错；
+2. **未登记的钥不算数**：`verify` 会把它列进 `trust_errors`（自造一对钥骗不过信任锚）；
+3. **改一个字节就断**：链或签名必然报错。
+
+## 八 甲轴不可伪造：把采集权交给 warrantd
+
+`observe` 的 `result` 由调用方给 —— 如果 agent 自己填，那"甲轴"就还是它说了算。所以：
+
+```bash
+warrantd observe --root .warrant --subject <claim id> --channel proc_spawn_readback --tier C1 \
+  --exec "python tools/measure.py --json"
+```
+
+`--exec` 时**命令由 warrantd 自己执行**，stdout 的 JSON 直接作为 `result`；agent 只能"请求跑"，
+不能"提供结果"。**这是甲轴唯一不可伪造的实现方式**（乙/丁轴按定义是自报，可伪造，所以永不计入门槛）。
+
+## 九 跨主机聚合
+
+每台机器各自维护一份账本（各自链独立自洽），聚合时只读地把条目并起来数轴 ——
+甲轴在这台、乙轴在那台，才凑得出 `d_eff=2`：
+
+```bash
+warrantd aggregate /mnt/a/.warrant /mnt/b/.warrant
+# → {"ok":true,"roots":[{"root":"...","chain_errors":[]}],"claims":[{"d_eff":2,...}]}
+```
+
+**诚实的限制**：聚合视图**不做跨本链校验**（两本的 `seq` 会冲突）；每本的链只看自己的
+`chain_errors`。跨主机信任最终仍要回到人（谁认定哪台机器是可信的）。
+
+## 十 多语言
+
+| 语言 | 位置 | 状态 |
+|---|---|---|
+| Python | `sdk/python/warrant` | ✅ 真机跑通（`examples/agent_demo.py`） |
+| TypeScript | `sdk/ts/warrant.ts` | ✅ 零依赖（node 18+），协议与 Python 逐字节相同 |
+| Go | `sdk/go/warrant.go` | ⚠️ **未编译验证**（开发机无 Go 工具链）；协议相同，约 120 行 |
+
+任何语言照 stdio 协议自己写十行即可，但**不要**自己实现 id / 链位 / 签名输入 —— 那是规范的事。
+
+## 十一 发布
+
+```bash
+cargo publish --dry-run          # 打包检查（已通过：45 文件 / 619 KiB）
+cargo publish                    # 需要 CARGO_REGISTRY_TOKEN，且能连到 crates.io
+```
+
+本仓已满足 `cargo package` 要求；`repository` 字段待填真实地址后即可发布。
