@@ -20,6 +20,8 @@ pub mod ledger;
 // 批锚 + 包含证明（纯函数叶子模块：不依赖任何执行层，不改既有条目语义）。
 pub mod merkle;
 pub mod projection;
+pub mod probe;
+pub mod proxy;
 pub mod rank;
 /// 签名与信任锚（人的那一轴）：密钥生成、待签字节、签名产生。
 pub mod signing;

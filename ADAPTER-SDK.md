@@ -129,17 +129,60 @@ warrantd freeze --root .warrant --claim <id> --signer user:me --print-payload
 2. **未登记的钥不算数**：`verify` 会把它列进 `trust_errors`（自造一对钥骗不过信任锚）；
 3. **改一个字节就断**：链或签名必然报错。
 
-## 八 甲轴不可伪造：把采集权交给 warrantd
+## 八 甲轴不可伪造：预置探针（probe）
 
-`observe` 的 `result` 由调用方给 —— 如果 agent 自己填，那"甲轴"就还是它说了算。所以：
+`observe --result '<json>'` 的 result 由调用方给 —— 如果 agent 自己填，"甲轴"就还是它说了算。
+`--exec "<cmd>"` 也不行：命令串是它递进来的，它完全可以递一个只输出 `{"bytes":13}` 的假脚本
+（**已默认关闭**，仅 `WARRANT_ALLOW_EXEC=1` 时可人工调试）。
+
+**正解 = 预置探针（闭集）**：agent 只能选探针名 + 参数，不能递代码。
 
 ```bash
-warrantd observe --root .warrant --subject <claim id> --channel proc_spawn_readback --tier C1 \
-  --exec "python tools/measure.py --json"
+warrantd observe --root .warrant --subject <claim id> \
+  --channel proc_spawn_readback --tier C1 \
+  --probe file.sha256 --arg path=/path/to/out.txt
+# → {"ok":true,"axis":"甲",...}
 ```
 
-`--exec` 时**命令由 warrantd 自己执行**，stdout 的 JSON 直接作为 `result`；agent 只能"请求跑"，
-不能"提供结果"。**这是甲轴唯一不可伪造的实现方式**（乙/丁轴按定义是自报，可伪造，所以永不计入门槛）。
+| 探针 | 参数 | 返回 |
+|---|---|---|
+| `file.stat` | `path` | `{path, exists, bytes}` |
+| `file.sha256` | `path` | `{path, bytes, sha256}` |
+| `dir.count` | `path`[, `ext`] | `{path, ext, count}` |
+| `json.field` | `path`, `key` | `{path, key, value}` |
+| `cmd.exit` | `exe`[, `args`(用 `\x1f` 分隔)] | `{exe, exit_code}` —— **不返回 stdout** |
+
+两条纪律写进代码（`tests/probe_proxy.rs` 钉住）：
+1. **未知探针一律拒绝**（"编个名字"骗不到轴，也不能执行任意代码）；
+2. **`cmd.exit` 不交 stdout** —— 否则它就成了"agent 的通用 shell + 读文件器"。
+
+⚠️ **`expect` 必须与探针返回同域**：`compare` 要求 `expect` 的**每个键**都在 result 里且相等，
+缺键算 `unknown`（不算支持证据）。所以要么让 claim 的 `expect` 用探针会回显的键
+（如 `{"path": "...", "sha256": "..."}`），要么别指望那条观测能产轴。
+
+## 九 MCP 代理（默认开启）
+
+探针解决了"测不了假"，但**只要 agent 可以选择不调 warrantd**，滞后与黑盒就还在。
+所以真正的形态是**插在中间**：
+
+```bash
+warrantd mcp-proxy --root .warrant --upstream "python my_mcp_server.py" \
+  --probe file.sha256 --arg path=/path/to/artifact
+```
+
+```text
+agent ──tools/call──▶ warrantd mcp-proxy ──▶ 上游 MCP server
+                       │ ① act：expect = agent 自己递的 arguments（不替它编预期）
+                       │ ② 转发、取回执（先还回执，记账失败不卡业务）
+                       └ ③ observe：tool_receipt（丁） + probe 实测（甲）
+```
+
+**它绕不过去**：agent 只能通过代理说话，每次 `tools/call` 都会自动落两条记录。
+`tests/probe_proxy.rs` 用内存上游钉住三件事：每次调用都有 claim、探针成功产甲轴、
+**探针失败绝不产出甲轴**（不伪造）。
+
+**限制（诚实）**：本实现按串行请求假设（发一个等一个）。MCP 允许并发/通知，并发时响应可能错配；
+需要并发请一条请求起一个代理进程。
 
 ## 九 跨主机聚合
 

@@ -50,8 +50,12 @@ warrantd freeze --root .warrant --claim <id> --key ~/warrant-human.key.json --si
 # → state: WARRANTED
 ```
 
-**甲轴不可伪造**：`warrantd observe --exec "<cmd>"` 时命令由 warrantd 自己执行、stdout 即结果，
-agent 只能"请求跑"不能"提供结果"。跨机器用 `warrantd aggregate <rootA> <rootB>` 合并数轴。
+**甲轴不可伪造**：`warrantd observe --probe file.sha256 --arg path=...` —— 探针是**闭集**，
+agent 只能选名字 + 参数，不能递代码（`--exec` 已默认关闭）。跨机器用
+`warrantd aggregate <rootA> <rootB>` 合并数轴。
+
+**默认开启**：`warrantd mcp-proxy --root .warrant --upstream "<你的 MCP server>" --probe file.sha256 --arg path=...`
+—— agent 只能通过代理说话，每次 `tools/call` 自动记一条 claim + 工具回执 + 探针实测，它绕不过去。
 
 多语言：Python ✅（真机跑通）/ TypeScript ✅（零依赖）/ Go ⚠️ 未编译验证（本机无工具链）。
 

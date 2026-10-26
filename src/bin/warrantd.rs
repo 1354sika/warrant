@@ -62,7 +62,16 @@ fn args_map(argv: &[String]) -> HashMap<String, String> {
         let a = &argv[i];
         if let Some(k) = a.strip_prefix("--") {
             let v = argv.get(i + 1).cloned().unwrap_or_default();
-            m.insert(k.to_string(), v);
+            // `--arg` / `--probe` 可重复（探针参数、多探针），用 \u{1f} 串起来
+            if k == "arg" || k == "probe" {
+                let e = m.entry(k.to_string()).or_insert_with(String::new);
+                if !e.is_empty() {
+                    e.push('\u{1f}');
+                }
+                e.push_str(&v);
+            } else {
+                m.insert(k.to_string(), v);
+            }
             i += 2;
         } else {
             // 位置参数记进 `_pos`（aggregate 用：`warrantd aggregate A B C`）
@@ -136,10 +145,37 @@ fn handle(adapter: &Adapter, op: &str, m: &HashMap<String, String>) -> Result<Va
             }
             let channel = m.get("channel").cloned().unwrap_or_default();
             let tier = m.get("tier").cloned().unwrap_or_else(|| "C1".to_string());
-            // `--exec`：**采集权在 warrantd**——命令由本进程执行，agent 只能“请求跑”，
-            // 不能“提供结果”。这是「甲轴不可伪造」的唯一实现方式：乙/丁轴的 result 由调用方给，
-            // 而甲轴必须是本进程亲眼看到的。
-            let result = if let Some(expr) = m.get("exec") {
+            // 观测结果有三种来源，**可信度完全不同**（这正是甲/乙/丁三轴的区别）：
+            //   ① `--probe <名> --arg k=v`：**预置探针**（推荐，也是甲轴唯一不可伪造的用法）
+            //      探针是闭集，agent 只能选名字 + 参数，不能递代码 ⇒ 它无法伪造测量结果。
+            //   ② `--exec "<cmd>"`：**默认关闭**。任意命令等于给 agent 一个 shell，
+            //      它完全可以递一个只输出 `{"bytes":13}` 的假脚本；确需人工调试时设 WARRANT_ALLOW_EXEC=1。
+            //   ③ `--result '<json>'`：调用方自报（乙/丁轴用）——按定义可伪造，所以永不计够格门槛。
+            let result = if let Some(list) = m.get("probe") {
+                let mut names = list.split('\u{1f}').filter(|x| !x.is_empty());
+                let name = names.next().ok_or_else(|| "缺少探针名".to_string())?;
+                if names.next().is_some() {
+                    return Err("observe 一次只接受一个 --probe（多条观测请分次写）".to_string());
+                }
+                let args: Vec<(String, String)> = m
+                    .get("arg")
+                    .map(|raw| {
+                        raw.split('\u{1f}')
+                            .filter_map(|kv| {
+                                kv.split_once('=').map(|(k, v)| (k.to_string(), v.to_string()))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                warrant::probe::run(name, &args).map_err(|e| format!("探针失败：{e}"))?
+            } else if let Some(expr) = m.get("exec") {
+                if std::env::var("WARRANT_ALLOW_EXEC").ok().as_deref() != Some("1") {
+                    return Err(
+                        "--exec 默认关闭：任意命令等于给 agent 一个 shell（它能递假脚本伪造结果）。\
+                         请改用 --probe <名> --arg k=v（预置探针，闭集）；确需人工调试时先设 WARRANT_ALLOW_EXEC=1"
+                            .to_string(),
+                    );
+                }
                 let out = std::process::Command::new("cmd")
                     .arg("/C")
                     .arg(expr)
@@ -404,6 +440,73 @@ fn main() {
                 ),
             ]))
         );
+        return;
+    }
+
+    // MCP 代理：插在 agent 与被控软件之间 —— **默认开启记账**（不是自觉，是结构）。
+    if cmd == "mcp-proxy" {
+        use warrant::proxy::{ProbeSpec, ProcessUpstream, ProxyConfig};
+        let upstream = match m.get("upstream") {
+            Some(u) if !u.is_empty() => u.clone(),
+            _ => {
+                println!(
+                    "{{\"ok\":false,\"error\":\"缺少 --upstream（上游 MCP server 命令），例如 --upstream \\\"python server.py\\\"\"}}"
+                );
+                std::process::exit(2);
+            }
+        };
+        let adapter = match root_of(&m) {
+            Ok(a) => a,
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(2);
+            }
+        };
+        // --probe 可重复；--arg 对该次代理的所有 probe 共用（探针参数是"看哪个对象"）
+        let args: Vec<(String, String)> = m
+            .get("arg")
+            .map(|raw| {
+                raw.split('\u{1f}')
+                    .filter_map(|kv| kv.split_once('=').map(|(k, v)| (k.to_string(), v.to_string())))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let probes: Vec<ProbeSpec> = m
+            .get("probe")
+            .map(|raw| {
+                raw.split('\u{1f}')
+                    .filter(|x| !x.is_empty())
+                    .map(|n| ProbeSpec {
+                        name: n.to_string(),
+                        args: args.clone(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let cfg = ProxyConfig {
+            actor: actor(&m),
+            probes,
+            upstream: upstream.clone(),
+        };
+        let mut up = match ProcessUpstream::spawn(&upstream) {
+            Ok(u) => u,
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(2);
+            }
+        };
+        eprintln!(
+            "warrantd mcp-proxy：账本={} 上游={} 探针={}",
+            adapter.root().display(),
+            upstream,
+            cfg.probes.len()
+        );
+        let stdin = std::io::stdin();
+        let stdout = std::io::stdout();
+        if let Err(e) = warrant::proxy::run_with(&adapter, &cfg, stdin.lock(), stdout, &mut up) {
+            eprintln!("mcp-proxy 退出：{e}");
+            std::process::exit(2);
+        }
         return;
     }
 
