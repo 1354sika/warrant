@@ -1,98 +1,179 @@
-# Warrant（信使 · 认定层）
+# Warrant
 
-> **别人优化「更聪明」，这里只解决一件事：一件事到底算不算「发生过」。**
-> AI 说"我做了"不算；**同一件事被两个独立来源看到、且至少一个不是它自己**，才够格。
+**An anti-black-box, anti-lag attestation layer for AI agents.**
 
-Warrant 是一个**可独立复算**的判定层，不依赖任何智能体、不绑定任何被控软件：
+> Every other project is racing to make agents smarter. Warrant answers a different question:
+> **did it actually happen?** — and answers it in a way a third party can recompute from bytes.
 
-| 它给你 | 你要付出的 |
-|---|---|
-| 一份**链式账本**（每条带规范 id 与 prev，改一条就断链） | 把事件写进来 |
-| 一套**证据轴与门槛**（甲/乙/丙/丁四轴，≥2 轴且至少一轴非 AI 才够格） | 说清每轴来自谁 |
-| **人签冻结**（只有人的签名能把"够格"变成"事实"） | 一把密钥 |
-| 一个**只读复算器**（第三人拿同一份账本自己算一遍） | 无 |
+`MIT OR Apache-2.0` · spec `warrant/1` (frozen) · 58 tests passing
 
-> **一句话：Warrant 不是给智能体加日志，是给它加「能不能说出口」的权力边界。**
-> 它治的不是"AI 会犯错"，而是**出错时没人能当场知道、事后也复核不了**——
-> 把**滞后**压到当轮，把**黑盒**压到只剩"轴的数量"。完整定位（含它治不了什么）：[`POSITIONING.md`](POSITIONING.md)。
+---
 
-## 30 秒：先自己算一遍
+## The two failure modes it exists to shrink
 
-```bash
-cargo test                       # 25 单测 + 17 一致性/链/签名测试
-cargo run --example make_sample_ledger   # 生成一份自洽示例账本 ledger/entries.jsonl
-cargo run --bin warrant-export -- --help 2>/dev/null || echo "见 src/bin/messenger_export.rs"
+An agent that can act on a real machine creates two problems that no amount of intelligence fixes.
+
+### 1. The black box
+
+You cannot tell what actually happened.
+
+- The agent says *"I wrote the file"* — you either believe it or read the logs afterwards.
+- Three "independent confirmations" turn out to be **one** evidence source restated three times.
+- Two agents, two sessions, two people cannot see what the other one did.
+
+### 2. The lag
+
+By the time you know, it is too late.
+
+- The sentence was already said, the file already overwritten, the board already flashed.
+- The rule *"don't claim what you cannot prove"* lives in a document **nobody was required to read**.
+- The judgement rules changed, and old conclusions are read as if produced under the new ones.
+
+Warrant is built around one blunt refusal:
+
+> **The system may not say something out loud when the evidence is not there.**
+
+---
+
+## What it does
+
+```mermaid
+flowchart LR
+  A[agent acts] --> B["claim: what it claims,<br/>with an expected result"]
+  A --> C["observation from an<br/>independent channel"]
+  B --> D{"d_eff = number of genuinely<br/>independent sources"}
+  C --> D
+  D -->|"d_eff &ge; 2 and not all AI self-report"| E[FREEZEABLE]
+  D -->|otherwise| F["TENTATIVE — may not be stated as fact"]
+  E -->|human signature| G[FACT]
+  F -.->|still allowed as a hypothesis| A
+  G --> A
 ```
 
-一致性档 **C1–C13** 的可执行定义 = `SPEC.md` 文本 + `vectors/*.json` 向量；测试逐字节对拍，
-**夹具缺失即失败、不跳过**（跳过等于假通过）。
+Three pieces, no more:
 
-## 接一个 agent（三行）
+1. **A chained, append-only ledger.** Every entry carries a canonical id and a `chain.prev` pointer. Change one byte and the chain breaks.
+2. **Evidence axes with a dimensionality gate.** `d_eff = rank(M)` is the number of *genuinely independent* sources behind a claim; `n − d_eff` is exactly where hallucination lives — three citations that are really one.
+3. **A gate at the exit, plus human freeze.** `d_eff ≥ 2` **and** at least one non-AI axis ⇒ `FREEZEABLE`. Only a human signature turns that into `FACT`.
+
+### The four axes
+
+| Axis | Meaning | Who can fake it |
+|---|---|---|
+| **A** | System log — *our own* out-of-process read-back / offline recomputation | requires changing the outside world |
+| **B** | The controlled software's own self-report (verify read-back) | the controlled software |
+| **C** | A human signature | requires the private key |
+| **D** | AI self-report (same-session tool receipt) | **the AI itself** — so it never counts toward the gate |
+
+### Why the counters can be trusted
+
+| Mechanism | What it removes |
+|---|---|
+| **Closed probe set** (`file.sha256`, `file.stat`, `dir.count`, `json.field`, `cmd.exit`) | the agent may *select* a probe and its arguments, but **cannot submit measurement code**; `cmd.exit` never returns stdout |
+| **MCP proxy, on by default** | the agent can only talk through the proxy; every `tools/call` is recorded automatically — it cannot opt out |
+| **Offline recomputation** | anyone holding `entries.jsonl` plus this repo reproduces the same verdict (`warrantd verify`) |
+| **Trust anchor** | a cryptographically valid signature from an *unregistered* key is rejected — a self-made key proves nothing |
+| **RULESET_VERSION bound into each snapshot** | judgements made under different rules cannot be silently mixed |
+
+---
+
+## Quick start
+
+```bash
+cargo test                                # 58 tests: conformance C1–C13, chain, signatures, probes, proxy
+cargo run --example make_sample_ledger    # reproducible sample ledger (106 lines / 96 dedup / 0 chain errors)
+```
+
+Record an action, observe it twice, and let the gate decide:
+
+```bash
+warrantd capability --root .warrant --actor agent:demo --caps write_file
+
+warrantd act --root .warrant --actor agent:demo --expect '{"path":"out.txt","bytes":13}'
+# → {"ok":true,"id":"sha256:..."}
+
+# Axis A — a real measurement performed by warrantd, not by the agent
+warrantd observe --root .warrant --subject sha256:... --channel proc_spawn_readback --tier C1 \
+  --probe file.sha256 --arg path=out.txt
+
+# Axis B — the controlled software's own read-back
+warrantd observe --root .warrant --subject sha256:... --channel mcp_verify_readback --tier C1 \
+  --result '{"path":"out.txt","bytes":13}'
+
+warrantd status --root .warrant
+# → {"claims":[{"state":"CONSISTENT","label":"FREEZEABLE","d_eff":2}]}
+```
+
+Python — three lines; other languages use the same stdio protocol:
 
 ```python
 from warrant import Warrant
 w = Warrant(".warrant")
-claim = w.act({"file": "out.txt", "bytes": 13})                       # 动手，带预期
-w.observe(claim, "proc_spawn_readback", {"file": "out.txt", "bytes": 13})  # 另一通道观测
-print(w.label(claim))        # FREEZEABLE（两条独立来源）/ TENTATIVE（只有它自己说的）
+claim = w.act({"path": "out.txt", "bytes": 13})
+w.observe(claim, "proc_spawn_readback", {"path": "out.txt", "bytes": 13}, tier="C1")
+print(w.label(claim))          # FREEZEABLE / TENTATIVE
 ```
 
-`warrantd` 是那一层可执行程序：`capability` / `act` / `observe` 三原语 + `status` / `verify`，
-**CLI 与 stdio 守护进程同一套实现**（不开端口）。详见 [`ADAPTER-SDK.md`](ADAPTER-SDK.md)，
-可跑示例 [`examples/agent_demo.py`](examples/agent_demo.py)、Python SDK [`sdk/python/warrant`](sdk/python/warrant)。
-
-**够格 ≠ 事实**：`FREEZEABLE` 之后要有人签 ——
+Turn `FREEZEABLE` into a fact with a human key registered as a trust anchor:
 
 ```bash
-warrantd keygen --out ~/warrant-human.key.json          # ① 生成人类钥（一次）
-warrantd trust  --root .warrant --key-id ed25519:<hex>  # ② 人登记（信任锚）
-warrantd freeze --root .warrant --claim <id> --key ~/warrant-human.key.json --signer user:me
+warrantd keygen --out ~/warrant-human.key.json
+warrantd trust  --root .warrant --key-id ed25519:<hex>     # must be run by a human
+warrantd freeze --root .warrant --claim sha256:... --key ~/warrant-human.key.json --signer user:me
 # → state: WARRANTED
 ```
 
-**甲轴不可伪造**：`warrantd observe --probe file.sha256 --arg path=...` —— 探针是**闭集**，
-agent 只能选名字 + 参数，不能递代码（`--exec` 已默认关闭）。跨机器用
-`warrantd aggregate <rootA> <rootB>` 合并数轴。
+Put it *in the middle* so it cannot be skipped:
 
-**默认开启**：`warrantd mcp-proxy --root .warrant --upstream "<你的 MCP server>" --probe file.sha256 --arg path=...`
-—— agent 只能通过代理说话，每次 `tools/call` 自动记一条 claim + 工具回执 + 探针实测，它绕不过去。
+```bash
+warrantd mcp-proxy --root .warrant --upstream "python my_mcp_server.py" \
+  --probe file.sha256 --arg path=artifact.bin
+```
 
-多语言：Python ✅（真机跑通）/ TypeScript ✅（零依赖）/ Go ⚠️ 未编译验证（本机无工具链）。
+Cross-host: each machine keeps its own chain; aggregate only counts axes.
 
-## 规范（改判据之前先读）
+```bash
+warrantd aggregate /mnt/a/.warrant /mnt/b/.warrant
+```
 
-| 文件 | 内容 |
+---
+
+## What Warrant does **not** do (honest boundaries)
+
+- **It does not judge content.** It counts how many independent sources saw something, not whether what they saw makes sense. Content can lie; the number of axes is harder to.
+- **It does not guarantee correctness.** A frozen fact can still be wrong. It guarantees that *insufficiently evidenced statements have no authority*.
+- **It cannot help a single-source, self-certifying, non-recomputable setup.** That is precisely what it was not built for.
+- **Probes prove the measurement, not the target.** If the caller supplies the path, it can point a probe at a decoy it just created — pin the target in host configuration for the stronger guarantee.
+- **The proxy assumes serial requests.** MCP permits concurrency; for concurrent clients run one proxy per request.
+
+## Status
+
+| Item | State |
 |---|---|
-| `SPEC.md` | v1.0，**已冻结**。规范序列化、事件 id、链位、签名输入、投影、门槛 |
-| `PROTOCOL.md` | 「凭什么算够格」：轴的定义、d_eff、状态机；顶部有**落地状态表**（哪些条款已落地、哪些没） |
-| `ADAPTER.md` | 宿主如何接入：适配器契约、能力声明、离线复算档 |
+| Conformance C1–C13 | ✅ vectors in-repo, byte-for-byte |
+| Adapter (3 primitives + status + verify) | ✅ `warrantd` CLI + stdio daemon |
+| Human freeze | ✅ `keygen` / `trust` / `freeze`, Ed25519 |
+| Unforgeable axis A | ✅ closed probe set (5 probes), `--exec` disabled by default |
+| Default-on recording | ✅ `mcp-proxy` |
+| Cross-host aggregation | ✅ `warrantd aggregate` |
+| SDKs | Python ✅ · TypeScript ✅ · Go ⚠️ not compiled here |
+| crates.io | ⏳ not published yet |
 
-## 它**不**做什么（诚实边界）
+## Specification
 
-- **不做内容判断**：它不读"日志里写了什么"，只数"有几个独立来源看到了"。内容可以骗人，轴的数量不容易。
-- **不替你决定可信**：够格 ≠ 正确。它只回答"这件事被几个独立来源观测、是否有人签过"。
-- **单源、自证、不可复算的场景它无能为力**——那种场景请用别的东西。
-- `demo/` 里的 5 个场景是**人工构造**的，不是真实攻击数据；README 里已标明差距与复现方式。
+`SPEC.md` (v1.0, **frozen**), `PROTOCOL.md` (why something qualifies), `ADAPTER.md` (how hosts plug in).
+The executable definition is the spec text **plus** `vectors/*.json`; the test suite fails rather than skips when a fixture is missing.
 
-## 目录
+Additional documents (Chinese): [`README.zh.md`](README.zh.md) · [`POSITIONING.md`](POSITIONING.md) · [`ADAPTER-SDK.md`](ADAPTER-SDK.md).
 
-```
-src/        canon(规范序列化/事件id) · ledger(信封/去重/链/验签) · rank(轴与门槛)
-            projection(投影) · admission(准入) · graph(证据图) · merkle(批锚/包含证明)
-            json(严格 JSON 解析器：不借库的宽松行为)
-tests/      C1–C13 一致性 + 真实链破坏检测 + 签名/信任锚
-vectors/    一致性向量（随仓发布，测试直接读）
-ledger/     示例账本（由 examples/make_sample_ledger 生成，可复现）
-demo/       5 个对照场景：裸判定器 vs 轴式判定
-```
+## License
 
-## 许可
+- **Code**: `MIT OR Apache-2.0` — see `LICENSE-MIT` / `LICENSE-APACHE`.
+- **Specification text**: **CC BY 4.0** (`LICENSE-DOCS.md`) — reuse with attribution.
+- **Name and marks**: "Warrant" and the project mark are not granted by the licenses above.
+  Please do not call a fork the official implementation; claim conformance by running `cargo test` and citing the vector version.
 
-- **代码**：`MIT OR Apache-2.0`（任选其一）。见 `LICENSE-MIT` / `LICENSE-APACHE`。
-- **规范文本**（`SPEC.md` / `PROTOCOL.md` / `ADAPTER.md`）：**CC BY 4.0**（`LICENSE-DOCS.md`），转载需署名。
-- **名称与商标**：「Warrant」「信使」及本项目 logo 不随上述许可授予；**请勿把你的分支称为官方实现**。
-  想声明"通过一致性档 C1–C13"，请跑 `cargo test` 并附上向量版本号。
+---
 
-## 引用
-
-见 `CITATION.cff`。若你在论文/审计报告里用到，请引用规范版本（`warrant/1`）而非某个提交号。
+> **Intelligence has a ceiling set by model vendors. "Did it actually happen" has no vendor.
+> Warrant is that layer: lag compressed into the current turn, the black box reduced to a number of axes.**
