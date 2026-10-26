@@ -12,6 +12,7 @@
 //!
 //! `rank`（秩内核：轴 / d_eff / I3 快照）与 `graph`（证据图：扇出 / 无环幂零）为纯函数叶子模块。
 pub mod admission;
+pub mod adapter;
 pub mod canon;
 pub mod graph;
 pub mod json;

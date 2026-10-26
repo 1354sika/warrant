@@ -221,6 +221,21 @@ fn state_indexed(
 
 /// 返回 (claim id, state)。观测条目不参与 —— 它们是投影的基元。
 pub fn project(entries: &[Entry], now: Option<&str>) -> Vec<(String, &'static str)> {
+    project_opts(entries, now, true)
+}
+
+/// 同 `project`，但 **不施加授权门控**（`grants = None`）。
+///
+/// 为什么需要它：宿主（ZeroPage）里每条 claim 都带 `authority.grant_id`，没有授权的
+/// claim 判 `UNAUTHORIZED` 是对的；但**独立接入的 agent 没有授权体系**，若一律套用这条，
+/// 它的 claim 会永远显示 `UNAUTHORIZED`——那不是“没授权”，而是“这个场景根本没有授权层”。
+/// 因此把“是否门控”显式化：宿主用 `project`（门控），接入层用本函数（不门控），
+/// 判据其余部分（一致性/轴/门槛）**完全相同**，不另立一套。
+pub fn project_opts(
+    entries: &[Entry],
+    now: Option<&str>,
+    gated: bool,
+) -> Vec<(String, &'static str)> {
     let merged = ledger::dedup(entries);
     // [FUSE-2026-09-30] 门槛激活态（人类签过 C1 ruling）**只算一次**，避免每条 claim 都重扫账本。
     let gate = active_ruling(&merged);
@@ -271,7 +286,7 @@ pub fn project(entries: &[Entry], now: Option<&str>) -> Vec<(String, &'static st
         .iter()
         .map(|e| {
             let o: &[&Entry] = obs.get(&e.id).map(|v| v.as_slice()).unwrap_or(&[]);
-            (e.id.clone(), state_indexed(&jidx, gate, e, o, &superseded, Some(&grants), now))
+            (e.id.clone(), state_indexed(&jidx, gate, e, o, &superseded, if gated { Some(&grants) } else { None }, now))
         })
         .collect()
 }

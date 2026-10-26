@@ -40,6 +40,13 @@ impl Value {
             _ => None,
         }
     }
+    /// 布尔取值（适配层与外部调用方常用；与 `as_str` / `as_int` 同族）。
+    pub fn as_bool(&self) -> Option<bool> {
+        match self {
+            Value::Bool(b) => Some(*b),
+            _ => None,
+        }
+    }
     pub fn as_array(&self) -> Option<&[Value]> {
         match self {
             Value::Array(a) => Some(a),

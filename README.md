@@ -27,6 +27,20 @@ cargo run --bin warrant-export -- --help 2>/dev/null || echo "见 src/bin/messen
 一致性档 **C1–C13** 的可执行定义 = `SPEC.md` 文本 + `vectors/*.json` 向量；测试逐字节对拍，
 **夹具缺失即失败、不跳过**（跳过等于假通过）。
 
+## 接一个 agent（三行）
+
+```python
+from warrant import Warrant
+w = Warrant(".warrant")
+claim = w.act({"file": "out.txt", "bytes": 13})                       # 动手，带预期
+w.observe(claim, "proc_spawn_readback", {"file": "out.txt", "bytes": 13})  # 另一通道观测
+print(w.label(claim))        # FREEZEABLE（两条独立来源）/ TENTATIVE（只有它自己说的）
+```
+
+`warrantd` 是那一层可执行程序：`capability` / `act` / `observe` 三原语 + `status` / `verify`，
+**CLI 与 stdio 守护进程同一套实现**（不开端口）。详见 [`ADAPTER-SDK.md`](ADAPTER-SDK.md)，
+可跑示例 [`examples/agent_demo.py`](examples/agent_demo.py)、Python SDK [`sdk/python/warrant`](sdk/python/warrant)。
+
 ## 规范（改判据之前先读）
 
 | 文件 | 内容 |
