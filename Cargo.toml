@@ -1,0 +1,32 @@
+[package]
+name = "warrant"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "Warrant — 可独立复算的「认定」层：证据轴、独立来源门槛、人签冻结与链式账本"
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+repository = "https://github.com/REPLACE-ME/warrant"
+keywords = ["provenance", "audit", "attestation", "ledger", "ai-safety"]
+categories = ["development-tools", "cryptography"]
+
+# 独立发布：不继承任何宿主 workspace
+[workspace]
+
+[dependencies]
+sha2 = "0.10"
+unicode-normalization = "0.1"
+# 仅用于**验证**签名（ledger::verify_signatures）；本 crate 不生成任何签名。
+ed25519-dalek = "2"
+p256 = { version = "0.13", default-features = false, features = ["ecdsa"] }
+
+[dev-dependencies]
+serde_json = "1"
+
+[[bin]]
+name = "warrant-export"
+path = "src/bin/messenger_export.rs"
+
+[[example]]
+name = "make_sample_ledger"
+path = "examples/make_sample_ledger.rs"

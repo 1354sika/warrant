@@ -1,0 +1,17 @@
+cff-version: 1.2.0
+message: "若你在论文、审计报告或产品文档里引用本项目，请使用下面这条。"
+title: "Warrant：可独立复算的认定层（规范 warrant/1）"
+abstract: "一种把「谁说的、凭什么信、够不够格」变成可复算账本与门槛的方法：证据轴、独立来源门槛、链式账本、人签冻结。"
+type: software
+license: "MIT OR Apache-2.0"
+repository-code: "https://github.com/REPLACE-ME/warrant"
+version: "0.1.0"
+date-released: "2026-10-26"
+keywords:
+  - provenance
+  - audit
+  - attestation
+  - ledger
+  - ai-safety
+authors:
+  - name: "Warrant contributors"
